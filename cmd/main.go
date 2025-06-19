@@ -2,42 +2,47 @@ package main
 
 import (
 	"fmt"
-	"net/http"
 	"os"
-	"time"
+	"os/signal"
+	"syscall"
 
 	"github.com/gin-gonic/gin"
+	"pr-previews/internal/config"
+	"pr-previews/internal/handlers"
 )
 
 func main() {
-	gin.SetMode(gin.ReleaseMode)
+	// Load configuration
+	cfg := config.Load()
 
+	// Create router
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":    "healthy",
-			"service":   "pr-previews",
-			"version":   "0.1.0",
-			"timestamp": time.Now().Format(time.RFC3339),
-		})
-	})
+	// Initialize handlers
+	h := handlers.New(cfg)
 
-	r.POST("/webhook/github", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "received",
-			"message": "GitHub webhook received successfully",
-		})
-	})
+	// Setup routes - Accept both GET and POST for testing
+	r.GET("/health", h.Health)
+	r.GET("/metrics", h.Metrics)
+	r.GET("/webhook/github", h.GitHubWebhook)  // For testing with query params
+	r.POST("/webhook/github", h.GitHubWebhook) // For real GitHub webhooks
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
+	// Start server
+	fmt.Printf("🚀 pr-previews server starting on port %s\n", cfg.Server.Port)
+	fmt.Printf("📊 Health: http://localhost:%s/health\n", cfg.Server.Port)
+	fmt.Printf("🪝 Webhook: http://localhost:%s/webhook/github\n", cfg.Server.Port)
+	fmt.Printf("🧪 Test: http://localhost:%s/webhook/github?comment=/help&user=testuser\n", cfg.Server.Port)
 
-	fmt.Printf("🚀 pr-previews server starting on port %s\n", port)
-	fmt.Printf("📊 Health: http://localhost:%s/health\n", port)
+	// Graceful shutdown
+	go func() {
+		r.Run(":" + cfg.Server.Port)
+	}()
 
-	r.Run(":" + port)
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	fmt.Println("\n✅ Server shut down gracefully")
 }
