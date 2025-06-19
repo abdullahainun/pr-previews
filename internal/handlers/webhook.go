@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -73,6 +74,17 @@ func (h *Handler) GitHubWebhook(c *gin.Context) {
 	switch cmd.Type {
 	case "help":
 		cmdResponse = basicService.ProcessCommand(cmd)
+		if cmdResponse.Success {
+			// Add manifest services info to help
+			repoPath := "."
+			availableServices := cmdService.GetAvailableServicesWithManifest(repoPath)
+			manifestInfo := "\n\n### 📁 Available Services\n"
+			for _, svc := range availableServices {
+				manifestInfo += fmt.Sprintf("- `%s`\n", svc)
+			}
+			manifestInfo += "\n**To add new services:** Create YAML manifests in `k8s/`, `kubernetes/`, `manifests/`, or `deploy/` folders."
+			cmdResponse.Content += manifestInfo
+		}
 	case "status":
 		cmdResponse = cmdService.HandleStatusK8s(c.Request.Context(), cmd)
 	case "plan":
@@ -85,7 +97,9 @@ func (h *Handler) GitHubWebhook(c *gin.Context) {
 				Content: "🔒 Access denied. Only core team can deploy.",
 			}
 		} else {
-			cmdResponse = cmdService.HandlePreviewK8s(c.Request.Context(), cmd)
+			// Use enhanced preview with manifest support
+			repoPath := "." // Current directory
+			cmdResponse = cmdService.HandlePreviewK8sEnhanced(c.Request.Context(), cmd, repoPath)
 		}
 	case "cleanup":
 		if !hasDeploymentPermission(cmd.User) {

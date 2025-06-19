@@ -401,3 +401,103 @@ func (k *K8sService) GetServiceInfo(ctx context.Context, namespace, serviceName 
 
 // Helper function for int32 pointer
 func int32Ptr(i int32) *int32 { return &i }
+
+func (k *K8sService) DeployFromParsedManifest(ctx context.Context, namespace string, parsed *ParsedManifest) error {
+	// Deploy ConfigMaps first (they might be needed by deployments)
+	for _, configMap := range parsed.ConfigMaps {
+		err := k.deployConfigMap(ctx, namespace, &configMap)
+		if err != nil {
+			return fmt.Errorf("failed to deploy configmap %s: %v", configMap.Name, err)
+		}
+	}
+
+	// Deploy Deployments
+	for _, deployment := range parsed.Deployments {
+		err := k.deployManifestDeployment(ctx, namespace, &deployment)
+		if err != nil {
+			return fmt.Errorf("failed to deploy deployment %s: %v", deployment.Name, err)
+		}
+	}
+
+	// Deploy Services
+	for _, service := range parsed.Services {
+		err := k.deployManifestService(ctx, namespace, &service)
+		if err != nil {
+			return fmt.Errorf("failed to deploy service %s: %v", service.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func (k *K8sService) deployManifestDeployment(ctx context.Context, namespace string, deployment *appsv1.Deployment) error {
+	// Clone deployment to avoid modifying original
+	dep := deployment.DeepCopy()
+
+	// Override namespace
+	dep.Namespace = namespace
+
+	// Add preview labels
+	if dep.Labels == nil {
+		dep.Labels = make(map[string]string)
+	}
+	dep.Labels["preview"] = "true"
+	dep.Labels["managed-by"] = "pr-previews"
+
+	// Add labels to pod template
+	if dep.Spec.Template.Labels == nil {
+		dep.Spec.Template.Labels = make(map[string]string)
+	}
+	dep.Spec.Template.Labels["preview"] = "true"
+
+	_, err := k.client.AppsV1().Deployments(namespace).Create(ctx, dep, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (k *K8sService) deployManifestService(ctx context.Context, namespace string, service *corev1.Service) error {
+	// Clone service to avoid modifying original
+	svc := service.DeepCopy()
+
+	// Override namespace
+	svc.Namespace = namespace
+
+	// Add preview labels
+	if svc.Labels == nil {
+		svc.Labels = make(map[string]string)
+	}
+	svc.Labels["preview"] = "true"
+	svc.Labels["managed-by"] = "pr-previews"
+
+	_, err := k.client.CoreV1().Services(namespace).Create(ctx, svc, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (k *K8sService) deployConfigMap(ctx context.Context, namespace string, configMap *corev1.ConfigMap) error {
+	// Clone configmap to avoid modifying original
+	cm := configMap.DeepCopy()
+
+	// Override namespace
+	cm.Namespace = namespace
+
+	// Add preview labels
+	if cm.Labels == nil {
+		cm.Labels = make(map[string]string)
+	}
+	cm.Labels["preview"] = "true"
+	cm.Labels["managed-by"] = "pr-previews"
+
+	_, err := k.client.CoreV1().ConfigMaps(namespace).Create(ctx, cm, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}

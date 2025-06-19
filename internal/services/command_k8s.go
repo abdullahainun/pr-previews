@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"pr-previews/internal/types"
@@ -249,6 +251,267 @@ func formatNamespaceList(names []string) string {
 	var result strings.Builder
 	for _, name := range names {
 		result.WriteString(fmt.Sprintf("- `%s`\n", name))
+	}
+	return result.String()
+}
+
+func (cs *CommandServiceK8s) GetAvailableServicesWithManifest(repoPath string) []string {
+	services := []string{"nginx (default)"}
+
+	// Scan for manifest files
+	manifestServices := cs.scanForManifestServices(repoPath)
+	services = append(services, manifestServices...)
+
+	return services
+}
+
+func (cs *CommandServiceK8s) scanForManifestServices(repoPath string) []string {
+	var manifestServices []string
+
+	// Define scan paths
+	scanPaths := []string{
+		"k8s/",
+		"kubernetes/",
+		"manifests/",
+		"deploy/",
+	}
+
+	for _, scanPath := range scanPaths {
+		fullScanPath := filepath.Join(repoPath, scanPath)
+
+		// Check if directory exists
+		if _, err := os.Stat(fullScanPath); os.IsNotExist(err) {
+			continue
+		}
+
+		// Scan directory for YAML files
+		files, err := filepath.Glob(filepath.Join(fullScanPath, "*.yaml"))
+		if err != nil {
+			continue
+		}
+
+		yamlFiles, err := filepath.Glob(filepath.Join(fullScanPath, "*.yml"))
+		if err == nil {
+			files = append(files, yamlFiles...)
+		}
+
+		for _, file := range files {
+			serviceName := cs.extractServiceNameFromPath(file)
+			if serviceName != "" {
+				manifestServices = append(manifestServices, fmt.Sprintf("%s (manifest from %s)", serviceName, scanPath))
+			}
+		}
+	}
+
+	return manifestServices
+}
+
+func (cs *CommandServiceK8s) extractServiceNameFromPath(manifestPath string) string {
+	fileName := filepath.Base(manifestPath)
+	serviceName := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+
+	// Clean up common generic names
+	if serviceName == "deployment" || serviceName == "service" || serviceName == "app" {
+		// Use directory name instead
+		dir := filepath.Dir(manifestPath)
+		dirName := filepath.Base(dir)
+		if dirName != "." && dirName != "/" {
+			return dirName
+		}
+	}
+
+	return serviceName
+}
+
+func (cs *CommandServiceK8s) isManifestBasedService(serviceName, repoPath string) bool {
+	// Check if service has corresponding manifest files
+	manifestPaths := []string{
+		fmt.Sprintf("k8s/%s.yaml", serviceName),
+		fmt.Sprintf("k8s/%s.yml", serviceName),
+		fmt.Sprintf("k8s/%s-deployment.yaml", serviceName),
+		fmt.Sprintf("kubernetes/%s.yaml", serviceName),
+		fmt.Sprintf("manifests/%s.yaml", serviceName),
+		fmt.Sprintf("deploy/%s.yaml", serviceName),
+	}
+
+	for _, manifestPath := range manifestPaths {
+		fullPath := filepath.Join(repoPath, manifestPath)
+		if _, err := os.Stat(fullPath); err == nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (cs *CommandServiceK8s) getManifestPath(serviceName, repoPath string) string {
+	manifestPaths := []string{
+		fmt.Sprintf("k8s/%s.yaml", serviceName),
+		fmt.Sprintf("k8s/%s.yml", serviceName),
+		fmt.Sprintf("kubernetes/%s.yaml", serviceName),
+		fmt.Sprintf("manifests/%s.yaml", serviceName),
+	}
+
+	for _, manifestPath := range manifestPaths {
+		fullPath := filepath.Join(repoPath, manifestPath)
+		if _, err := os.Stat(fullPath); err == nil {
+			return fullPath
+		}
+	}
+
+	return ""
+}
+
+// Enhanced preview command with manifest awareness
+
+func (cs *CommandServiceK8s) HandlePreviewK8sEnhanced(ctx context.Context, cmd *types.Command, repoPath string) *types.CommandResponse {
+	serviceName := cmd.Service
+	if serviceName == "" {
+		serviceName = "nginx" // Default
+	}
+
+	// Check if service is manifest-based
+	isManifest := cs.isManifestBasedService(serviceName, repoPath)
+	manifestPath := ""
+	deploymentMethod := "default (nginx:alpine)"
+
+	if isManifest {
+		manifestPath = cs.getManifestPath(serviceName, repoPath)
+		deploymentMethod = "manifest-deployment"
+	}
+
+	// Show available services if service not found (except default nginx)
+	if serviceName != "nginx" && !isManifest {
+		availableServices := cs.GetAvailableServicesWithManifest(repoPath)
+		return &types.CommandResponse{
+			Success: false,
+			Message: "Service not found",
+			Content: fmt.Sprintf("## ❌ Service Not Found\n\n**Service:** `%s`\n\n**Available services:**\n%s\n\n**Usage Examples:**\n- `/preview` - Deploy nginx (default)\n- `/preview myapp` - Deploy from k8s/myapp.yaml\n- `/preview frontend` - Deploy from k8s/frontend.yaml\n\n**To add new services:**\nCreate YAML manifest files in `k8s/`, `kubernetes/`, `manifests/`, or `deploy/` folders.",
+				serviceName, formatAvailableServicesList(availableServices)),
+		}
+	}
+
+	// Create namespace
+	cleanServiceName := strings.ReplaceAll(serviceName, "/", "-")
+	namespaceName := fmt.Sprintf("preview-pr-%d-%s", cmd.PRNumber, cleanServiceName)
+
+	// Step 1: Create namespace
+	err := cs.k8s.CreateNamespace(ctx, namespaceName, cmd.PRNumber, serviceName)
+	if err != nil {
+		return &types.CommandResponse{
+			Success: false,
+			Message: "Preview deployment failed",
+			Content: fmt.Sprintf("## ❌ Preview Deployment Failed\n\n**Error:** %s", err.Error()),
+		}
+	}
+
+	// Step 2: Deploy based on method
+	var deployedResources []string
+
+	if isManifest {
+		// Parse and deploy from manifest
+		parser := NewManifestParser()
+		parsed, err := parser.ParseManifestFile(manifestPath)
+		if err != nil {
+			return &types.CommandResponse{
+				Success: false,
+				Message: "Manifest parsing failed",
+				Content: fmt.Sprintf("## ❌ Manifest Parsing Failed\n\n**Error:** %s\n\n**Manifest File:** %s", err.Error(), manifestPath),
+			}
+		}
+
+		// Deploy from parsed manifest
+		err = cs.k8s.DeployFromParsedManifest(ctx, namespaceName, parsed)
+		if err != nil {
+			return &types.CommandResponse{
+				Success: false,
+				Message: "Manifest deployment failed",
+				Content: fmt.Sprintf("## ❌ Manifest Deployment Failed\n\n**Error:** %s\n\n**Manifest File:** %s", err.Error(), manifestPath),
+			}
+		}
+
+		// Build deployed resources list
+		for _, dep := range parsed.Deployments {
+			deployedResources = append(deployedResources, fmt.Sprintf("Deployment/%s", dep.Name))
+		}
+		for _, svc := range parsed.Services {
+			deployedResources = append(deployedResources, fmt.Sprintf("Service/%s", svc.Name))
+		}
+		for _, cm := range parsed.ConfigMaps {
+			deployedResources = append(deployedResources, fmt.Sprintf("ConfigMap/%s", cm.Name))
+		}
+
+	} else {
+		// Regular nginx deployment
+		err = cs.k8s.DeployTestPod(ctx, namespaceName, cleanServiceName)
+		if err != nil {
+			return &types.CommandResponse{
+				Success: false,
+				Message: "Pod deployment failed",
+				Content: fmt.Sprintf("## ❌ Pod Deployment Failed\n\n**Error:** %s", err.Error()),
+			}
+		}
+
+		err = cs.k8s.CreateService(ctx, namespaceName, cleanServiceName)
+		if err != nil {
+			return &types.CommandResponse{
+				Success: false,
+				Message: "Service creation failed",
+				Content: fmt.Sprintf("## ❌ Service Creation Failed\n\n**Error:** %s", err.Error()),
+			}
+		}
+
+		deployedResources = []string{
+			fmt.Sprintf("Deployment/%s", cleanServiceName),
+			fmt.Sprintf("Service/%s", cleanServiceName),
+		}
+	}
+
+	// Build success response
+	var manifestNote string
+	var resourcesList string
+
+	if isManifest {
+		manifestNote = fmt.Sprintf("\n\n🎯 **Manifest Deployed:** Successfully deployed from `%s`\n📋 **Real Deployment:** Resources deployed directly from your manifest!", manifestPath)
+		resourcesList = strings.Join(deployedResources, ", ")
+	} else {
+		resourcesList = strings.Join(deployedResources, ", ")
+	}
+
+	return &types.CommandResponse{
+		Success: true,
+		Message: "Preview deployment started",
+		Content: fmt.Sprintf("## 🚀 Preview Deployment Started\n\n**👤 Triggered by:** @%s\n**🎯 Service:** %s\n**📄 Method:** %s\n**🔗 PR:** #%d\n**📦 Namespace:** `%s`\n\n### 📋 Deployment Status\n- ✅ Namespace created successfully\n- ✅ Resources deployed: %s\n- 🔄 Pod startup in progress...\n\n### 📊 Resources Created\n%s\n\n**Estimated ready time:** 30-60 seconds%s",
+			cmd.User, serviceName, deploymentMethod, cmd.PRNumber, namespaceName,
+			resourcesList, cs.formatResourcesList(deployedResources), manifestNote),
+		Data: map[string]interface{}{
+			"service":            serviceName,
+			"clean_service_name": cleanServiceName,
+			"namespace":          namespaceName,
+			"deployment_method":  deploymentMethod,
+			"manifest_detected":  isManifest,
+			"manifest_path":      manifestPath,
+			"deployed_resources": deployedResources,
+			"pr_number":          cmd.PRNumber,
+			"status":             "deploying",
+		},
+	}
+}
+
+// Helper function for formatting service list
+func formatAvailableServicesList(services []string) string {
+	var result strings.Builder
+	for _, service := range services {
+		result.WriteString(fmt.Sprintf("- `%s`\n", service))
+	}
+	return result.String()
+}
+
+// Helper method for formatting resources list
+func (cs *CommandServiceK8s) formatResourcesList(resources []string) string {
+	var result strings.Builder
+	for _, resource := range resources {
+		result.WriteString(fmt.Sprintf("- **%s**\n", resource))
 	}
 	return result.String()
 }
