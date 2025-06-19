@@ -11,9 +11,9 @@ type Response struct {
 }
 
 type Command struct {
-	Type     string `json:"type"`     // preview, plan, cleanup, status, help
-	Service  string `json:"service"`  // specific service to deploy
-	User     string `json:"user"`     // GitHub username
+	Type     string `json:"type"`    // preview, plan, cleanup, status, help
+	Service  string `json:"service"` // specific service to deploy
+	User     string `json:"user"`    // GitHub username
 	PRNumber int    `json:"pr_number"`
 }
 
