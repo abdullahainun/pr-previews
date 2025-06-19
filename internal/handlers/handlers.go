@@ -71,3 +71,17 @@ func (h *Handler) TestK8s(c *gin.Context) {
 
 	c.JSON(http.StatusOK, response)
 }
+
+func (h *Handler) respondError(c *gin.Context, status int, message string, err error) {
+	response := types.Response{
+		Success:   false,
+		Message:   message,
+		Timestamp: time.Now(),
+	}
+
+	if err != nil {
+		response.Error = err.Error()
+	}
+
+	c.JSON(status, response)
+}
