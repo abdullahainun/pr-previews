@@ -23,17 +23,18 @@ func main() {
 	// Initialize handlers
 	h := handlers.New(cfg)
 
-	// Setup routes - Accept both GET and POST for testing
+	// Setup routes
 	r.GET("/health", h.Health)
 	r.GET("/metrics", h.Metrics)
-	r.GET("/webhook/github", h.GitHubWebhook)  // For testing with query params
-	r.POST("/webhook/github", h.GitHubWebhook) // For real GitHub webhooks
+	r.GET("/webhook/github", h.GitHubWebhook)
+	r.POST("/webhook/github", h.GitHubWebhook)
+	r.GET("/test/k8s", h.TestK8s) // ← New K8s test endpoint
 
 	// Start server
 	fmt.Printf("🚀 pr-previews server starting on port %s\n", cfg.Server.Port)
 	fmt.Printf("📊 Health: http://localhost:%s/health\n", cfg.Server.Port)
 	fmt.Printf("🪝 Webhook: http://localhost:%s/webhook/github\n", cfg.Server.Port)
-	fmt.Printf("🧪 Test: http://localhost:%s/webhook/github?comment=/help&user=testuser\n", cfg.Server.Port)
+	fmt.Printf("☸️  K8s Test: http://localhost:%s/test/k8s\n", cfg.Server.Port)
 
 	// Graceful shutdown
 	go func() {
