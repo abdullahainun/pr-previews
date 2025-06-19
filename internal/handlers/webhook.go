@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -12,121 +13,111 @@ import (
 func (h *Handler) GitHubWebhook(c *gin.Context) {
 	var payload map[string]interface{}
 
-	// Only parse JSON for POST requests
 	if c.Request.Method == "POST" {
-		// Try to parse JSON payload, but don't fail if it's not valid JSON
 		c.ShouldBindJSON(&payload)
 	}
 
-	// Initialize payload map if nil
 	if payload == nil {
 		payload = make(map[string]interface{})
 	}
 
-	// Get comment from query params (for testing) or payload
 	commentBody := c.Query("comment")
-	if commentBody == "" {
-		// Check if it's in the POST payload
-		if comment, ok := payload["comment"]; ok {
-			if commentStr, ok := comment.(string); ok {
-				commentBody = commentStr
-			}
-		}
-
-		// Check if it's a GitHub webhook with issue comment
-		if issue, ok := payload["issue"]; ok {
-			if issueMap, ok := issue.(map[string]interface{}); ok {
-				if pullRequest, exists := issueMap["pull_request"]; exists && pullRequest != nil {
-					// This is a PR comment
-					if comment, ok := payload["comment"]; ok {
-						if commentMap, ok := comment.(map[string]interface{}); ok {
-							if body, ok := commentMap["body"].(string); ok {
-								commentBody = body
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Get user from query params or payload
-	user := c.Query("user")
-	if user == "" {
-		// Check payload for user info
-		if comment, ok := payload["comment"]; ok {
-			if commentMap, ok := comment.(map[string]interface{}); ok {
-				if userObj, ok := commentMap["user"]; ok {
-					if userMap, ok := userObj.(map[string]interface{}); ok {
-						if login, ok := userMap["login"].(string); ok {
-							user = login
-						}
-					}
-				}
-			}
-		}
-
-		// Default user for testing
-		if user == "" {
-			user = "testuser"
-		}
-	}
-
-	// Get PR number from query params or payload
-	prNumber := 123 // Default for testing
-	if prStr := c.Query("pr"); prStr != "" {
-		// Could parse prStr to int, but keeping simple for now
-	}
-
-	// If no comment provided, return basic webhook response with examples
 	if commentBody == "" {
 		response := types.Response{
 			Success:   true,
 			Message:   "GitHub webhook received",
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{
-				"note":   "Add ?comment=/help&user=yourname to test command parsing",
+				"note":   "Add ?comment=/help&user=yourname to test",
 				"method": c.Request.Method,
 				"examples": map[string]string{
 					"help":    "/webhook/github?comment=/help&user=testuser",
 					"status":  "/webhook/github?comment=/status&user=testuser",
-					"plan":    "/webhook/github?comment=/plan&user=testuser",
 					"preview": "/webhook/github?comment=/preview&user=abdullahainun",
 					"cleanup": "/webhook/github?comment=/cleanup&user=abdullahainun",
 				},
-				"available_commands": []string{"/help", "/status", "/plan", "/preview", "/cleanup"},
 			},
 		}
 		c.JSON(http.StatusOK, response)
 		return
 	}
 
-	// Initialize command service
-	cmdService := services.NewCommandService()
+	user := c.Query("user")
+	if user == "" {
+		user = "testuser"
+	}
+	prNumber := 123
 
-	// Parse command
-	cmd, err := cmdService.ParseCommand(commentBody, user, prNumber)
+	// Create services
+	cmdService, err := services.NewCommandServiceK8s()
+	if err != nil {
+		h.respondError(c, http.StatusInternalServerError, "Failed to create K8s service", err)
+		return
+	}
+
+	basicService := services.NewCommandService()
+	cmd, err := basicService.ParseCommand(commentBody, user, prNumber)
 	if err != nil {
 		response := types.Response{
 			Success:   false,
 			Message:   "Command parsing failed",
 			Error:     err.Error(),
 			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"comment_received":   commentBody,
-				"user":               user,
-				"available_commands": []string{"/help", "/status", "/plan", "/preview", "/cleanup"},
-				"example":            "Try: ?comment=/help&user=testuser",
-			},
 		}
 		c.JSON(http.StatusBadRequest, response)
 		return
 	}
 
 	// Process command
-	cmdResponse := cmdService.ProcessCommand(cmd)
+	var cmdResponse *types.CommandResponse
 
-	// Return successful response
+	switch cmd.Type {
+	case "help":
+		cmdResponse = basicService.ProcessCommand(cmd)
+		if cmdResponse.Success {
+			// Add manifest services info to help
+			repoPath := "."
+			availableServices := cmdService.GetAvailableServicesWithManifest(repoPath)
+			manifestInfo := "\n\n### 📁 Available Services\n"
+			for _, svc := range availableServices {
+				manifestInfo += fmt.Sprintf("- `%s`\n", svc)
+			}
+			manifestInfo += "\n**To add new services:** Create YAML manifests in `k8s/`, `kubernetes/`, `manifests/`, or `deploy/` folders."
+			cmdResponse.Content += manifestInfo
+		}
+	case "status":
+		cmdResponse = cmdService.HandleStatusK8s(c.Request.Context(), cmd)
+	case "plan":
+		cmdResponse = basicService.ProcessCommand(cmd)
+	case "preview":
+		if !hasDeploymentPermission(cmd.User) {
+			cmdResponse = &types.CommandResponse{
+				Success: false,
+				Message: "Access denied",
+				Content: "🔒 Access denied. Only core team can deploy.",
+			}
+		} else {
+			// Use enhanced preview with manifest support
+			repoPath := "." // Current directory
+			cmdResponse = cmdService.HandlePreviewK8sEnhanced(c.Request.Context(), cmd, repoPath)
+		}
+	case "cleanup":
+		if !hasDeploymentPermission(cmd.User) {
+			cmdResponse = &types.CommandResponse{
+				Success: false,
+				Message: "Access denied",
+				Content: "🔒 Access denied. Only core team can cleanup.",
+			}
+		} else {
+			cmdResponse = cmdService.HandleCleanupK8s(c.Request.Context(), cmd)
+		}
+	default:
+		cmdResponse = &types.CommandResponse{
+			Success: false,
+			Message: "Unknown command",
+		}
+	}
+
 	response := types.Response{
 		Success:   cmdResponse.Success,
 		Message:   cmdResponse.Message,
@@ -134,12 +125,11 @@ func (h *Handler) GitHubWebhook(c *gin.Context) {
 		Data: map[string]interface{}{
 			"command":        cmd,
 			"command_result": cmdResponse,
-			"github_content": cmdResponse.Content, // This would be posted to GitHub
+			"github_content": cmdResponse.Content,
 			"method":         c.Request.Method,
 		},
 	}
 
-	// If command failed, include error
 	if !cmdResponse.Success {
 		response.Error = cmdResponse.Message
 		response.Success = false
@@ -148,16 +138,12 @@ func (h *Handler) GitHubWebhook(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-func (h *Handler) respondError(c *gin.Context, status int, message string, err error) {
-	response := types.Response{
-		Success:   false,
-		Message:   message,
-		Timestamp: time.Now(),
+func hasDeploymentPermission(user string) bool {
+	coreTeam := []string{"abdullahainun"}
+	for _, member := range coreTeam {
+		if user == member {
+			return true
+		}
 	}
-
-	if err != nil {
-		response.Error = err.Error()
-	}
-
-	c.JSON(status, response)
+	return false
 }
