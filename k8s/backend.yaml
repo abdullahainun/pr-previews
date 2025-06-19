@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+    component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+        component: api
+    spec:
+      containers:
+      - name: backend
+        image: node:18-alpine
+        command: ["/bin/sh"]
+        args: ["-c", "echo 'Starting API server...' && npm init -y && npm install express && node -e \"const express = require('express'); const app = express(); app.get('/', (req, res) => res.json({message: 'Backend API is running!', env: 'preview'})); app.listen(8080, () => console.log('API running on port 8080'));\""]
+        ports:
+        - containerPort: 8080
+          name: api
+        env:
+        - name: NODE_ENV
+          value: "preview"
+        - name: PORT
+          value: "8080"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - name: api
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  type: ClusterIP
